@@ -144,6 +144,7 @@ if __name__ == "__main__":
     for _ in range(PACKETS_PER_SECOND):
         thread = threading.Thread(target=request_thread)
         thread.start()
+        print("\r" +str(url)+ " run)")
         threads.append(thread)
 
     for thread in threads:
